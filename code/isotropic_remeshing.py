@@ -35,7 +35,7 @@
 #       To keep all components someday, set MIN_COMPONENT_FACES = 0 (or comment out that filter).
 
 from __future__ import annotations
-import sys, re, argparse, pathlib
+import sys, re, argparse, pathlib, os
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -45,7 +45,7 @@ from pymeshlab import PureValue  # absolute quantities in 2025+ API
 # ----------- Defaults you can tune -----------
 # Target remeshing parameters (surface-distance check disabled by default for speed)
 TARGET_EDGE_LENGTH = 3.0
-TARGET_AREA = 4.0  # Default target area for equilateral triangle
+TARGET_AREA = 3.0  # Default target area for equilateral triangle
 ITERATIONS = 5
 FEATURE_ANGLE_DEG = 90.0
 MAX_SURF_DIST = 2.0
@@ -78,6 +78,12 @@ except Exception:
 
 
 # ----------- I/O helpers -----------
+def ensure_results_directory():
+    """Create results directory if it doesn't exist and return the path."""
+    results_dir = pathlib.Path("results")
+    results_dir.mkdir(exist_ok=True)
+    return results_dir
+
 def calculate_edge_length_from_area(target_area):
     """Calculate edge length of equilateral triangle from target area.
     
@@ -171,8 +177,8 @@ def ensure_vertex_normals(ms: pymeshlab.MeshSet):
 
 def save_mesh_csv(vertices, faces, points_file='remeshed_points.csv', faces_file='remeshed_faces.csv'):
     """Save vertices and faces as CSVs. Faces written 1-indexed for convenience."""
-    pd.DataFrame(vertices, columns=['surf_x', 'surf_y', 'surf_z']).to_csv(points_file, index=False)
-    pd.DataFrame(faces + 1, columns=['v1', 'v2', 'v3']).to_csv(faces_file, index=False)
+    pd.DataFrame(vertices, columns=['surf_x', 'surf_y', 'surf_z']).to_csv(str(points_file), index=False)
+    pd.DataFrame(faces + 1, columns=['v1', 'v2', 'v3']).to_csv(str(faces_file), index=False)
     print(f"[CSV] Saved: {points_file}, {faces_file}")
 
 def save_mesh_ply(vertices, faces, ply_path):
@@ -181,12 +187,12 @@ def save_mesh_ply(vertices, faces, ply_path):
     m = pymeshlab.Mesh(vertex_matrix=vertices, face_matrix=faces)
     ms.add_mesh(m, 'mesh')
     ensure_vertex_normals(ms)
-    ms.save_current_mesh(ply_path)
+    ms.save_current_mesh(str(ply_path))  # Convert Path to string for pymeshlab
     print(f"[PLY] Saved: {ply_path}")
 
 def save_mesh_npz(vertices, faces, npz_path):
     """Save numpy arrays for fast Python reload."""
-    np.savez(npz_path, V=vertices.astype(np.float32), F=faces.astype(np.int32))
+    np.savez(str(npz_path), V=vertices.astype(np.float32), F=faces.astype(np.int32))  # Convert Path to string
     print(f"[NPZ] Saved: {npz_path}")
 
 # ----------- Viz helper -----------
@@ -441,14 +447,15 @@ if __name__ == "__main__":
         target_edge_length = calculate_edge_length_from_area(args.target_area)
         print(f"Calculated target edge length: {target_edge_length:.4f} from target area: {args.target_area}")
 
-    # Generate output filenames using prefix
+    # Create results directory and generate output filenames
+    results_dir = ensure_results_directory()
     prefix = args.output_prefix
-    original_ply = f"{prefix}_original.ply"
-    original_npz = f"{prefix}_original.npz"
-    remeshed_points_csv = f"{prefix}_remeshed_points.csv"
-    remeshed_faces_csv = f"{prefix}_remeshed_faces.csv"
-    remeshed_ply = f"{prefix}_remeshed.ply"
-    remeshed_npz = f"{prefix}_remeshed.npz"
+    original_ply = results_dir / f"{prefix}_original.ply"
+    original_npz = results_dir / f"{prefix}_original.npz"
+    remeshed_points_csv = results_dir / f"{prefix}_remeshed_points.csv"
+    remeshed_faces_csv = results_dir / f"{prefix}_remeshed_faces.csv"
+    remeshed_ply = results_dir / f"{prefix}_remeshed.ply"
+    remeshed_npz = results_dir / f"{prefix}_remeshed.npz"
 
     # --- Save ORIGINAL as PLY + NPZ ---
     print("Saving ORIGINAL mesh (PLY + NPZ)...")
@@ -480,12 +487,13 @@ if __name__ == "__main__":
     save_mesh_ply(V2, F2, remeshed_ply)
     save_mesh_npz(V2, F2, remeshed_npz)
 
-    print("Done. Outputs:")
-    print(f"  ORIGINAL:  {original_ply}, {original_npz}")
-    print(f"  REMESHED:  {remeshed_points_csv}, {remeshed_faces_csv}, {remeshed_ply}, {remeshed_npz}")
+    print("Done. Outputs in 'results' folder:")
+    print(f"  ORIGINAL:  {original_ply.name}, {original_npz.name}")
+    print(f"  REMESHED:  {remeshed_points_csv.name}, {remeshed_faces_csv.name}, {remeshed_ply.name}, {remeshed_npz.name}")
     
     # Print mesh statistics
     print(f"\nMesh Statistics:")
     print(f"  Original:  {V.shape[0]} vertices, {F.shape[0]} faces")
     print(f"  Remeshed:  {V2.shape[0]} vertices, {F2.shape[0]} faces")
     print(f"  Target edge length used: {target_edge_length:.4f}")
+    print(f"\nAll files saved to: {results_dir.absolute()}")
