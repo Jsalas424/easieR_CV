@@ -1,0 +1,389 @@
+---
+title: "Solve Remeshed Surface in MATLAB, triangle average CVs here"
+author: "Jonathan Salas"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  html_document:
+    df_print: kable
+    fig_width: 7
+    fig_height: 6
+---
+
+# Start with a clean slate
+
+```{r echo = F, include=FALSE}
+# Remove all starting code
+rm(list = ls(all.names = TRUE)) 
+# Detach Packages 
+try(invisible(lapply(paste0('package:', names(sessionInfo()$otherPkgs)), detach, character.only=TRUE, unload=TRUE)), silent = T) # Detach Packages
+```
+
+# Load Packages 
+
+```{r setup, include=FALSE}
+library(eiEAM)
+library(knitr)
+library(scales)
+library(rgl)
+library(plotly)
+library(dplyr)
+opts_knit$set(root.dir = "~/R_Projects/easieR_CV/")
+```
+
+# What subject, timepoint, and pacing_dir are we working with?
+
+```{r}
+id <- "sbrt_14" # all lowercase, study_id format e.g., "sbrt_03"
+timepoint <- "t1" # "t1" vs "t2" t1 = baseline; t2 = terminal
+pacing_dir <- "apaced" # "rvpaced" vs "apaced"
+diagnostic.plots <- F
+```
+
+# Import Data 
+
+```{r echo=F}
+load(paste0("data/ready_to_analyze/",id,"/","remeshed_",.GlobalEnv$pacing_dir,"_",.GlobalEnv$timepoint,".RData"))
+```
+
+## Excel Import
+
+After interpolating onto the remeshed (step 2) mesh externally in MATLAB, we reimport it here as the *remeshed.xlsx
+
+We expect the new folder to contain the CV speeds and LATs interpolated onto the remeshed surfaces
+
+```{r}
+remeshed_cv <-
+  (paste0(
+    "~/R_Projects/RBF_CV2/data/raw/",
+    id,
+    "/",
+    id,
+    "_",
+    timepoint,
+    "_remeshed.xlsx"
+  ))
+
+## Return the sheetnames from the excel raw data doc
+sheetnames <-
+  readxl::excel_sheets(remeshed_cv)[-1] #skip first sheet
+
+## Return the sheetnames from the excel raw data doc
+mylist <-
+  lapply(sheetnames, readxl::read_excel, path = remeshed_cv)
+
+## name the dataframes
+names(mylist) <- sheetnames
+```
+
+## Remove Empty Rows
+
+```{r}
+mylist <- lapply(mylist, janitor::remove_empty, "rows")
+```
+
+# Make working data
+
+```{r}
+remesh_vertices_roi <- remesh_vertices_roi |>
+  filter(pacing_dir == .GlobalEnv$pacing_dir) |>
+  cbind(mylist[paste0("remeshed_roi_",.GlobalEnv$pacing_dir)]) |>
+  rename(cv = paste0("remeshed_roi_", .GlobalEnv$pacing_dir, ".cv"),
+         lat_annot = paste0("remeshed_roi_", .GlobalEnv$pacing_dir, ".lats"))
+```
+
+# Create Mesh
+
+```{r}
+remeshed_roi <- tmesh3d(
+  vertices = t(as.matrix(remesh_vertices_roi[, c("surf_x","surf_y","surf_z")])),
+  indices = t(as.matrix(remesh_faces_roi[, 1:3])),
+  homogeneous = FALSE
+)
+
+# Generate wireframe coordinates using Rvcg-compatible function
+remeshed_roi_wireframe <- create_wireframe_mesh(remeshed_roi)
+```
+
+# Plot Starting Mesh
+
+```{r}
+  # Define title text
+  plot_title <- paste0(
+    "ID: ", id, "<br>",
+    "Wavefront: ", pacing_dir, "<br>",
+    "Timepoint: ", timepoint, "<br>",
+    "Intervention: ", unique(remesh_vertices_roi$intervention)
+  )
+
+  # Define annotation
+  annotation_text <- "RBF Solution of Remeshed Surface"
+  annotation <- list(
+    x = 1, y = -0.07,
+    text = annotation_text,
+    showarrow = FALSE,
+    xref = "paper", yref = "paper",
+    xanchor = "right",
+    font = list(size = 15)
+  )
+
+  # Define marker properties
+  marker_props <- list(
+    color = ~cv,
+    cmin = 0,
+    cmax = 0.4,  # values above 0.4 m/s use max color
+    colorscale = "YlOrRd",
+    colorbar = list(
+      x = 0.5,
+      y = -0.05,
+      title = "CV (m/s)",
+      orientation = "h"
+    ),
+    tickvals = c(0, 0.4)
+  )
+
+plot_ly() |>
+  add_mesh(
+    name = "Remeshed Endo",
+    x = t(remeshed_roi$vb[1:3, ])[, 1],  # Extract vertices from mesh3d object
+    y = t(remeshed_roi$vb[1:3, ])[, 2],
+    z = t(remeshed_roi$vb[1:3, ])[, 3],
+    i = t(remeshed_roi$it)[, 1] - 1,     # Extract faces from mesh3d object and convert to 0-indexed
+    j = t(remeshed_roi$it)[, 2] - 1,
+    k = t(remeshed_roi$it)[, 3] - 1,
+    flatshading = TRUE,
+    showlegend = TRUE,
+    type = "mesh3d"
+  ) |>
+  add_trace(
+    name = "Wireframe",
+    data = remeshed_roi_wireframe,
+    x = ~ x, y = ~ y, z = ~ z,
+    type = "scatter3d",
+    mode = "lines",
+    line = list(color = "black", width = 1),
+    showlegend = FALSE,
+    hoverinfo = "none"
+  ) |>
+    add_trace(
+      name = "RBF CV",
+      type = "scatter3d",
+      mode = "markers",
+      data = remesh_vertices_roi,
+      x = ~surf_x, y = ~surf_y, z = ~surf_z,
+      showlegend = TRUE,
+      marker = marker_props,
+      hovertext = ~paste0("CV (m/s): ", round(cv, 3))
+    ) |>
+  layout(
+    showlegend = TRUE,
+    scene = list(camera = list(
+      eye = list(x = -1.5, y = 0.2, z = 1.5),
+      # orbital angle
+      up  = list(x = 0, y = 1, z = 0)      # which direction is "up"
+    )),
+      annotations = list(annotation),
+      title = list(y = 0.95, text = plot_title)
+    )
+```
+
+# Stats for remeshed solution prior to triangle averaging
+
+## Unfiltered
+
+```{r}
+remesh_vertices_roi |>
+  summarise(median(cv),
+            lognormal_mean(cv),
+            lognormal_sd(cv),
+            n()) |>
+  mutate(across(where(is.numeric), \(x) round(x, 3)))
+```
+
+## Look at CVs below 0.1m/s and above the 99th quantile
+
+```{r}
+remesh_vertices_roi |>
+  filter(cv > 0.1 & cv < quantile(cv, .99, na.rm=T)) |>
+  summarise(median(cv),
+            lognormal_mean(cv),
+            lognormal_sd(cv),
+            n()) |>
+  mutate(across(where(is.numeric), \(x) round(x, 3)))
+```
+
+# Triangle Average
+
+If all three vertices of a triangle don't have a CV, then assign it NA for velocity. 
+
+```{r echo = F}
+# This will hold the unique labels we assign per triangle
+res <- vector(length=nrow(remesh_faces_roi))
+```
+
+```{r}
+for(i in seq_along(1:nrow(remesh_faces_roi))) {
+  # Grab the CV for each Vertex in a Triangle
+  cv1 = remesh_vertices_roi$cv[remesh_faces_roi[[i,1]]]
+  cv2 = remesh_vertices_roi$cv[remesh_faces_roi[[i,2]]]
+  cv3 = remesh_vertices_roi$cv[remesh_faces_roi[[i,3]]]
+  res[i] <- median(c(cv1, cv2, cv3), na.rm=T)
+}
+
+tri_cv_res <- as.data.frame(remesh_faces_roi) |> bind_cols(tri_cv = res) |>
+  mutate(idx = seq_along(1:n()))
+```
+
+# Color Faces based on CV
+
+```{r}
+# Function for continuous color interpolation
+get_velocity_color <- function(x, min_val = 0.1, max_val = 0.4) {
+  if (is.na(x)) return("#9B9B9B")  # Gray for NA
+  if (x >= max_val) return("#FAFA00")  # Yellow for >= 0.4
+  
+  # Scale x to [0, 1] for continuous interpolation
+  x_scaled <- (x - min_val) / (max_val - min_val)
+  x_scaled <- pmax(0, pmin(1, x_scaled))  # Clamp to [0, 1]
+  
+  # Interpolate color (red to yellow)
+  rgb_vals <- colorRamp(c("#FF0000", "#FAFA00"))(x_scaled)
+  rgb(rgb_vals[1], rgb_vals[2], rgb_vals[3], maxColorValue = 255)
+}
+
+# Apply to dataframe
+tri_cv_res <- tri_cv_res |>
+  mutate(cv_facecolor = Vectorize(get_velocity_color)(tri_cv)) |>
+  arrange(idx)
+```
+
+
+# Plot
+
+```{r}
+plot_ly() |>
+  add_mesh(
+    name = "Remeshed Endo and CV",
+    data = tri_cv_res,
+    # Extract vertices from mesh3d object
+    x = t(remeshed_roi$vb[1:3, ])[, 1],
+    y = t(remeshed_roi$vb[1:3, ])[, 2],
+    z = t(remeshed_roi$vb[1:3, ])[, 3],
+    # Extract faces from mesh3d object and convert to 0-indexed
+    i = t(remeshed_roi$it)[, 1] - 1,
+    j = t(remeshed_roi$it)[, 2] - 1,
+    k = t(remeshed_roi$it)[, 3] - 1,
+    flatshading = TRUE,
+    type = "mesh3d",
+    facecolor = ~ cv_facecolor,
+    hovertext = ~ paste0("Speed (m/s) ", round(tri_cv_res$tri_cv, 3))
+  ) |>
+  add_trace(
+    name = "Remeshed Wireframe",
+    data = remeshed_roi_wireframe,
+    x = ~ x,
+    y = ~ y,
+    z = ~ z,
+    type = "scatter3d",
+    mode = "lines",
+    line = list(color = "black", width = 1),
+    hoverinfo = "none"
+  ) |>
+  layout(
+    showlegend = TRUE,
+    scene = list(camera = list(
+      eye = list(x = -1.5, y = 0.2, z = 1.5),
+      # orbital angle
+      up  = list(x = 0, y = 1, z = 0)      # which direction is "up"
+    )),
+    annotations =
+      list(
+        x = 1,
+        y = -0.07,
+        text = "Triangle Averaged Velocities",
+        showarrow = F,
+        xref = 'paper',
+        yref = 'paper',
+        xanchor = 'right',
+        yanchor = 'auto',
+        xshift = 0,
+        yshift = 0,
+        font = list(size = 15)
+      ),
+    title = list(
+      y = 0.95,
+      text = paste0(
+        "ID:",
+        id,
+        "<br>",
+        "Wavefront: ",
+        pacing_dir,
+        "<br>",
+        "Timepoint: ",
+        timepoint,
+        "<br>",
+        "Intervention: ",
+        unique(remesh_vertices_roi$intervention)
+      )
+    )
+  )
+```
+
+```{r}
+tri_cv_res |>
+  filter(tri_cv > 0.1 & tri_cv < quantile(tri_cv, .99, na.rm=T)) |>
+  summarise(median(tri_cv),
+            lognormal_mean(tri_cv),
+            lognormal_sd(tri_cv),
+            n()) |>
+  mutate(across(where(is.numeric), \(x) round(x, 3)))
+```
+
+# Save Data
+
+```{r}
+tri_cv_res <- tri_cv_res |>
+  mutate(
+    id = .GlobalEnv$id,
+    timepoint = .GlobalEnv$timepoint,
+    pacing_dir = .GlobalEnv$pacing_dir,
+    intervention = unique(remesh_vertices_roi$intervention),
+    group = "remesh_tri_cv",
+    across(v1:v3, ~ as.integer(.))
+  )
+```
+
+```{r}
+combine_rds_pacing_dir_v2(id = .GlobalEnv$id,
+                       tri_cv_res,
+                       grouping = "remesh_tri_cv",
+                       base_dir = paste0("data/working_data/"),
+                       suffix = "",
+                       step = "tri_cv_step_3",
+                       timepoint = .GlobalEnv$timepoint,
+                       wavefront = .GlobalEnv$pacing_dir)
+```
+
+```{r}
+combine_rds_pacing_dir_v2(id = .GlobalEnv$id,
+                       remesh_vertices_roi,
+                       grouping = "carto_remesh",
+                       base_dir = paste0("data/working_data/"),
+                       suffix = "",
+                       step = paste0("remeshed_cv_step_3"),
+                       timepoint = .GlobalEnv$timepoint,
+                       wavefront = .GlobalEnv$pacing_dir)
+```
+
+# Version and Package Details
+
+```{r echo=F}
+paste(version$version.string, version$nickname) 
+paste0("RStudio Version ",rstudioapi::versionInfo()$version, " ", rstudioapi::versionInfo()$release_name) # RStudio Version
+subset(data.frame(sessioninfo::package_info()), attached==TRUE, c(package, loadedversion)) # Loaded Packages
+```
+
+# When was this file last run to completion?
+
+```{r}
+date()
+```

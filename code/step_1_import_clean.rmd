@@ -1,0 +1,228 @@
+---
+title: "Import and Clean Data"
+author: "Jonathan Salas"
+date: "Last Updated `r format(Sys.time(), '%d %B, %Y')`"
+output: html_document
+---
+
+# Start with a clean slate
+
+```{r echo = F, include=FALSE}
+# Remove all starting code
+rm(list = ls(all.names = TRUE)) 
+# Detach Packages 
+try(invisible(lapply(paste0('package:', names(sessionInfo()$otherPkgs)), detach, character.only=TRUE, unload=TRUE)), silent = T) # Detach Packages
+```
+
+# Load Packages 
+
+```{r setup, include=FALSE}
+library(knitr)
+library(readxl)
+library(stringr)
+library(janitor)
+library(dplyr)
+opts_knit$set(root.dir = "~/R_Projects/easieR_CV/")
+```
+
+# What subject and timepoint are we working with?
+
+```{r}
+patient_id <- "sbrt_03" # all lowercase, study_id format e.g., "sbrt_03"
+timepoint <- "t1" # "t1" vs "t2" t1 = baseline; t2 = terminal
+import_slicer_voltage <- FALSE # TRUE or FALSE depending on if we're importing voltage through slicer or matlab respectively
+```
+
+# Import the raw data - Point to the correct raw data directory
+
+```{r}
+raw.data.dir <-
+  paste0(
+    "~/R_Projects/RBF_CV2/data/raw/",
+    patient_id,
+    "/",
+    patient_id,
+    "_",
+    timepoint,
+    ".xlsx"
+  )
+
+subject_db_dir <-
+  "~/R_Projects/RBF_CV2/data/subject_db.xlsx"
+```
+
+# Excel import
+
+## Import Subject data
+```{r}
+# Return the sheetnames from the excel raw data doc
+sheetnames <-
+  readxl::excel_sheets(raw.data.dir)[-1] #skip first sheet
+
+# Return the sheetnames from the excel raw data doc
+mylist <-
+  lapply(sheetnames, readxl::read_excel, path = raw.data.dir)
+
+# name the dataframes
+names(mylist) <- sheetnames
+```
+
+## Remove Empty Rows
+
+```{r}
+mylist <- lapply(mylist, janitor::remove_empty, "rows")
+```
+
+## Now bring cleaned rows data to environment
+
+```{r}
+# Bring the dataframes to the global environment
+list2env(mylist, .GlobalEnv)
+```
+
+```{r}
+carto_lv_sr <- carto_lv_sr |>
+  mutate(
+    group = "carto_mesh",
+    pacing_dir = "sr",
+    id = patient_id,
+    timepoint = timepoint
+  )
+
+carto_lv_sr_connex <- carto_lv_sr_connex |>
+  mutate(
+    group = "carto_mesh_connex",
+    pacing_dir = "sr",
+    id = patient_id,
+    timepoint = timepoint
+  )
+
+if (.GlobalEnv$import_slicer_voltage == TRUE) {
+  carto_lv_sr_volt <-
+    merge(
+      # Only valid "name" flags are "Unipolar" and "Bipolar"
+      import_slicer_carto_voltage(slicer_lv_sr_volt,
+                                  name = "Unipolar"),
+      import_slicer_carto_voltage(slicer_lv_sr_volt,
+                                  name = "Bipolar")
+    ) |>
+    mutate(group = "lv_volt",
+           pacing_dir = "sr",
+           volt_tags = "[]")
+} else{
+  carto_lv_sr_volt <- carto_lv_sr_volt |>
+    mutate(group = "lv_volt",
+           pacing_dir = "sr")
+}
+
+# This contains the coordinates of just the scar as determined by MRI
+mri_scar_lv_rvpaced <- mri_scar_lv_rvpaced |>
+  mutate(group = "mri_scar",
+         pacing_dir = "rvpaced")
+
+mri_scar_lv_apaced <- mri_scar_lv_apaced |>
+  mutate(group = "mri_scar",
+         pacing_dir = "apaced")
+
+# These are the LAT values with their relevant data
+carto_rv_paced_lat <- carto_rv_paced_lat |>
+  mutate(group = "lat_coord",
+         pacing_dir = "rvpaced")
+
+# These are the vertices and connectivity matrix for the carto surface mesh
+carto_rv_paced <- carto_rv_paced |>
+  mutate(group = "carto_mesh",
+         pacing_dir = "rvpaced")
+
+carto_rv_paced_connex <- carto_rv_paced_connex |>
+  mutate(group = "carto_mesh_connex",
+         pacing_dir = "rvpaced")
+
+# These are the LAT values with their relavent data
+carto_a_paced_lat <- carto_a_paced_lat |>
+  mutate(group = "lat_coord",
+         pacing_dir = "apaced")
+
+# These are the vertices and connectivity matrix for the carto surface mesh
+carto_a_paced <- carto_a_paced |>
+  mutate(group = "carto_mesh",
+         pacing_dir = "apaced")
+
+carto_a_paced_connex <- carto_a_paced_connex |>
+  mutate(group = "carto_mesh_connex",
+         pacing_dir = "apaced")
+```
+
+## Import Subject DB for Intervention labels
+
+```{r}
+subject_db <- readxl::read_excel(subject_db_dir)
+
+if (nrow(subject_db[subject_db$id == paste0(patient_id), "id"]) > 0) {
+  print("patient_id you entered exists in the Subject database")
+} else{
+  stop(print("patient_id you entered doesn't exist in the database."))
+}
+```
+
+# Make initial data - Assign timepoint and pt. id
+
+```{r}
+#Bind the rows together for all the data, not the connectivity matrices
+raw.data.1 <- bind_rows(
+  carto_lv_sr_volt,
+  carto_a_paced_lat,
+  carto_a_paced,
+  carto_rv_paced_lat,
+  carto_rv_paced,
+  mri_scar_lv_apaced,
+  mri_scar_lv_rvpaced
+) |>
+  # Assign the patient id, timepoint, and group as defined in the beginning of this doc
+  mutate(id = .GlobalEnv$patient_id,
+         timepoint = .GlobalEnv$timepoint) |>
+  # Search the subject_db for the id you declared up top, grab the intervention cell
+  mutate((subject_db |> filter(id == paste0(
+    .GlobalEnv$patient_id
+  )))["intervention"])
+
+carto_connex <-
+  rbind(carto_a_paced_connex, carto_rv_paced_connex) |>
+  mutate(id = patient_id,
+         timepoint = timepoint)
+```
+
+# Save cleaned data
+
+```{r}
+# These two need to be preserved for backwards compatability with the activaiton timing data. 
+#saveRDS(raw.data.1, paste0("data/unaltered_data/",patient_id,"_",timepoint,"_raw.rds"))
+#saveRDS(carto_connex, paste0("data/unaltered_data/",patient_id,"_",timepoint,"_raw_connex.rds"))
+
+save(raw.data.1, carto_connex, file = paste0("data/unaltered_data/",patient_id,"_",timepoint,"_raw.Rdata"))
+
+# This should be the new standard going forward but currently it only works for the voltage pipeline
+save(carto_lv_sr, carto_lv_sr_connex, 
+     file = paste0("data/unaltered_data/",patient_id,"_",timepoint,"_raw_volt_connex.Rdata"))
+```
+
+# Version and Package Details
+
+```{r echo=F}
+paste(version$version.string, version$nickname)
+paste0(
+  "RStudio Version ",
+  rstudioapi::versionInfo()$version,
+  " ",
+  rstudioapi::versionInfo()$release_name
+) # RStudio Version
+subset(data.frame(sessioninfo::package_info()),
+       attached == TRUE,
+       c(package, loadedversion)) # Loaded Packages
+```
+
+# When were these files last rewritten?
+
+```{r}
+date()
+```

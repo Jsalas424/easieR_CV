@@ -1,0 +1,699 @@
+---
+title: "NN-Coregistration"
+author: "Jonathan Salas"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  html_document:
+    df_print: kable
+    fig_width: 7
+    fig_height: 6
+---
+
+# Start with a clean slate
+
+## Remove all objects
+
+```{r echo = F, include=FALSE}
+rm(list = ls(all.names = TRUE)) # Remove all starting code
+```
+
+## Detach Packages
+
+```{r include=FALSE}
+try(invisible(lapply(paste0('package:', names(sessionInfo()$otherPkgs)), detach, character.only=TRUE, unload=TRUE)), silent = T) # Detach Packages
+```
+
+
+```{r setup, include=FALSE}
+library(eiEAM)
+library(gtsummary)
+library(lme4)
+library(lmerTest)
+library(emmeans)
+library(knitr)
+library(RColorBrewer)
+library(scales)
+library(rgl)
+library(plotly)
+library(dplyr)
+opts_knit$set(root.dir = "~/R_Projects/RBF_CV2/")
+```
+
+# What subject, timepoint, and pacing_dir are we working with?
+
+```{r}
+id <- "sbrt_16" # all lowercase, study_id format e.g., "sbrt_03"
+timepoint <- "t1" # "t1" vs "t2" t1 = baseline; t2 = terminal
+pacing_dir <- "apaced" # "rvpaced" vs "apaced"
+diagnostic.plots <- T
+```
+
+# Import Data 
+
+```{r echo=F}
+# This is the raw data - we need this for the scar, lat coordinates, etc.
+load(paste0("data/unaltered_data/",id,"_",timepoint,"_raw.RData"))
+# We don't need the original mesh, we import the remeshed product
+rm(carto_connex)
+data_1 <- raw.data.1
+
+# This is the remeshed data - this brings in remeshed_vertices_roi without their CVs
+load(paste0("data/ready_to_analyze/",id,"/","remeshed_",.GlobalEnv$pacing_dir,"_",.GlobalEnv$timepoint,".RData"))
+
+# This has the remeshed vertices with the RBF solution for their CVs
+remesh_vertices_roi <- readRDS(paste0("data/working_data/","remeshed_cv_step_3_",.GlobalEnv$timepoint,".rds"))
+
+# This is the triangulated result
+tri_cv_raw <- readRDS(paste0("data/working_data","/","tri_cv_step_3_",.GlobalEnv$timepoint,".rds"))
+tri_cv <- tri_cv_raw
+```
+
+# Data Validation - Make sure we loaded in the correct data from the working_data directory
+
+```{r echo = F}
+if(
+  all(sapply(list(unique(remesh_vertices_roi$id)), 
+             FUN = identical, 
+             unique(tri_cv_raw$id)))
+){
+  print(paste0("Currently working with ", unique(remesh_vertices_roi$id)))
+  id <- unique(remesh_vertices_roi$id)
+} else{
+  stop(
+    paste0("ID's Don't Match")
+  )
+}
+```
+
+# Make working data
+
+```{r echo=F}
+remesh_vertices_roi <- remesh_vertices_roi |> filter(pacing_dir == .GlobalEnv$pacing_dir) |> mutate(lat = round(lat_annot - 2000,1)) |> select(-lat_annot)
+tri_cv <- tri_cv |> filter(pacing_dir == .GlobalEnv$pacing_dir)
+```
+
+# Nearest Neighbor Scar Coregistration:
+
+```{r echo = F}
+neighbors_radius <- 1
+n_neighbors <- 1
+
+surf_data_train <-
+  remesh_vertices_roi |> select(surf_x:surf_z)
+
+surf_data_testing <-
+  data_1 |> filter(group == "mri_scar" &
+                     pacing_dir == .GlobalEnv$pacing_dir) |> select(x:z)
+
+# Training data is what you want to project on to - CARTO Mesh
+# Testing data is what the data you want to project - MRI Scar
+if (nrow(surf_data_testing) != 0) {
+  frnn_surf_data <- fr_nearest_neighbors(
+    training_data = surf_data_train,
+    testing_data = surf_data_testing,
+    neighbors_radius = .GlobalEnv$neighbors_radius
+  )
+  
+  nnn_surf_data <-
+    n_nearest_neighbors(
+      training_data = surf_data_train,
+      testing_data = surf_data_testing,
+      n_neighbors = .GlobalEnv$n_neighbors
+    )
+  
+  # The distinct surf_x:surf_z coordinates are the carto mesh coordinates within x mm AND n-nearest neighbor to the scar. Thus, the distinct surf_x:surf_z coordinates on the endocardical surface that match the surf_x:surf_z coordinates of our points, are scar.
+u_surf_coord <-
+  distinct(rbind(frnn_surf_data,
+                 nnn_surf_data),
+           surf_x,
+           surf_y,
+           surf_z)
+} else{
+  print("No scar here!")
+}
+```
+
+```{r echo = F}
+if(nrow(surf_data_testing) != 0) {
+  
+  # If there are scar coordinates, label the surface vertices based on if they were or weren't in the u_surf_coord result
+  remesh_vertices_roi <- bind_rows(
+    anti_join(x = surf_data_train, y = u_surf_coord) |>
+      mutate(region = "mri_healthy"),
+    semi_join(x = surf_data_train, y  = u_surf_coord) |>
+      mutate(region = "mri_scar")) |>
+    left_join(x = remesh_vertices_roi)
+  
+  # Add the surf_dist
+  remesh_vertices_roi <- left_join(
+    y = nnn_surf_data |>
+      group_by(surf_x, surf_y, surf_z) |>
+      summarise(scar_dist = round(mean(surf_dist), 3)),
+    x = remesh_vertices_roi
+  ) |>
+    arrange(idx)
+  
+  # Label Triangles Based on Number of Vertices Coregistered to Scar
+  ## Instantiate temp variable
+  temp <- vector(length = nrow(tri_cv))
+  
+  for (i in seq_along(1:nrow(tri_cv))) {
+    region1 <- remesh_vertices_roi[tri_cv[[i, "v1"]], "region"]
+    region2 <- remesh_vertices_roi[tri_cv[[i, "v2"]], "region"]
+    region3 <- remesh_vertices_roi[tri_cv[[i, "v3"]], "region"]
+    
+    temp[i] <- Mode(c(region1, region2, region3))
+    
+  }
+  
+  tri_cv <- tri_cv |>
+  cbind(region = temp,
+        region_facecolor = if_else(temp == "mri_healthy", "purple", "red"))
+  
+} else{
+  
+    # If there aren't scar coordinates, label the surface vertices healthy
+  temp <- surf_data_train |>
+    mutate(region = "mri_healthy")
+  print("No scar here!")
+  
+  # Combine Results with Original DF
+  remesh_vertices_roi <- left_join(y = temp,
+                                   x = remesh_vertices_roi |> filter(pacing_dir == .GlobalEnv$pacing_dir)) |>
+    arrange(idx)
+  
+  tri_cv <- tri_cv |>
+  mutate(region = "mri_healthy",
+        region_facecolor = "purple")
+}
+```
+
+```{r echo=F}
+#remesh <-
+#  cgalMesh$new(
+#    vertices = as.matrix(remesh_vertices_roi[, 1:3]),
+#    faces = as.matrix(remesh_faces_roi[, 1:3]),
+#    clean = FALSE
+#  )
+
+# Create mesh3d object with cleaning instead of cgalMesh
+carto_mesh <- tmesh3d(
+  vertices = t(as.matrix(remesh_vertices_roi[, 1:3])),
+  indices = t(as.matrix(remesh_faces_roi[, 1:3])),
+  homogeneous = FALSE
+)
+
+# Generate wireframe coordinates using Rvcg-compatible function
+carto_wireframe <- create_wireframe_mesh(carto_mesh)
+```
+
+# Nearest Neighbor LAT Coregistration:
+
+```{r echo = F}
+n_neighbors <- 1
+
+surf_data_testing <-
+  remesh_vertices_roi |> select(surf_x:surf_z)
+
+surf_data_train <-
+  data_1 |> filter(group == "lat_coord" &
+                     pacing_dir == .GlobalEnv$pacing_dir) |>
+  select(x:z)
+
+# Training data is what you want to project on to - LAT Coordinates 
+# Testing data is what the data you want to project - Remesh 
+if (nrow(surf_data_testing) != 0) {
+  nnn_surf_data <-
+    n_nearest_neighbors(
+      training_data = surf_data_train,
+      testing_data = surf_data_testing,
+      n_neighbors = .GlobalEnv$n_neighbors
+    )
+} else{
+  print("No LAT Coordinates here!")
+}
+```
+
+```{r echo = F}
+remesh_vertices_roi <-  left_join(
+  y = nnn_surf_data |>
+    select(-c(surf_x:surf_z)) |>
+    rename(
+      surf_x = x,
+      surf_y = y,
+      surf_z = z,
+      lat_surf_dist = surf_dist
+    ),
+  x = remesh_vertices_roi
+)
+```
+
+## Get Average CV <-> LAT Distance per Triangle
+
+```{r echo = F}
+res <- vector(length = nrow(tri_cv))
+```
+
+```{r echo = F}
+for(i in seq_along(1:nrow(tri_cv))){
+  
+  vert1 <- remesh_vertices_roi[tri_cv[[i,"v1"]],"lat_surf_dist"]
+  vert2 <- remesh_vertices_roi[tri_cv[[i,"v2"]],"lat_surf_dist"]
+  vert3 <- remesh_vertices_roi[tri_cv[[i,"v3"]],"lat_surf_dist"]
+  
+  res[i] <- mean(vert1, vert2, vert3)
+  
+}
+```
+
+```{r echo = F}
+tri_cv <- tri_cv |>
+  cbind(tri_lat_dist = as.numeric(res)) |>
+  mutate(tri_lat_dist = round(tri_lat_dist, 3))
+```
+
+# Plot Results
+
+```{r echo=F}
+plot_remesh_visualization <- function(remesh, remesh_vertices_roi, tri_cv, data_1,
+                                      id, pacing_dir, timepoint,
+                                      cv_lower_limit = 0.1, 
+                                      cv_upper_limit = 0.4,  # NEW ARGUMENT
+                                      lat_dist_threshold = 5) {
+  
+  # Compute global min/max for LATs
+  rbf_max <- max(remesh_vertices_roi$lat, na.rm = TRUE)
+  measured_max <- data_1 |>
+    filter(pacing_dir == .GlobalEnv$pacing_dir, group == "lat_coord") |>
+    mutate(lat = round(lat_annot - lat_ref, 0)) |>
+    summarise(max(lat, na.rm = TRUE)) |> pull()
+  
+  rbf_min <- min(remesh_vertices_roi$lat, na.rm = TRUE)
+  measured_min <- data_1 |>
+    filter(pacing_dir == .GlobalEnv$pacing_dir, group == "lat_coord") |>
+    mutate(lat = round(lat_annot - lat_ref, 0)) |>
+    summarise(min(lat, na.rm = TRUE)) |> pull()
+  
+  plot_max <- max(rbf_max, measured_max, na.rm = TRUE)
+  plot_min <- min(rbf_min, measured_min, na.rm = TRUE)
+  
+# Update tri_cv with new cv_facecolor logic
+  tri_cv <- tri_cv |>
+    mutate(
+      hover_cv = paste0("Tri CV (m/s): ", round(tri_cv, 3)),
+      hover_lat_dist = paste0("LAT to CV Distance (mm): ", round(tri_lat_dist, 3)),
+      cv_facecolor = case_when(
+        tri_lat_dist > lat_dist_threshold | tri_cv > cv_upper_limit ~ "#626363",  # LAT distance OR CV > threshold ~ gray
+        tri_cv < cv_lower_limit ~ "#4D1919",           # Brown if CV < lower limit
+        .default = cv_facecolor                       # otherwise keep original
+      )
+    )
+
+  # Update remesh_vertices_roi capped plotting values
+  remesh_vertices_roi <- remesh_vertices_roi |>
+    mutate(
+      hover_cv = paste0("CV (m/s): ", round(cv, 3)),
+      hover_lat = paste0("RBF LATs (ms): ", round(lat, 0)),
+      cv_plot = pmax(pmin(cv, cv_upper_limit), cv_lower_limit)  # Cap both lower and upper
+    )
+
+  
+  if ("scar_dist" %in% names(remesh_vertices_roi)) {
+    remesh_vertices_roi <- remesh_vertices_roi |>
+      mutate(hover_scar_dist = paste0("Scar to Surface Distance (mm): ", scar_dist))
+  }
+  
+  data_lat_measured <- data_1 |>
+    filter(pacing_dir == .GlobalEnv$pacing_dir, group == "lat_coord") |>
+    mutate(
+      lat = round(lat_annot - lat_ref, 0),
+      hover_lat = paste0("Measured LATs (ms): ", lat)
+    )
+  
+  # Base plot
+  p <-  plot_ly() |> add_trace(
+    name = "CARTO Wireframe",
+    data = carto_wireframe,
+    x = ~ x,
+    y = ~ y,
+    z = ~ z,
+    type = "scatter3d",
+    mode = "lines",
+    line = list(color = "black", width = 3),
+    showlegend = TRUE,
+    hoverinfo = "none"
+  ) |> 
+    add_trace(
+      name = "Scar Coregistration", type = "mesh3d", data = tri_cv,
+      x = remesh_vertices_roi$surf_x, y = remesh_vertices_roi$surf_y, z = remesh_vertices_roi$surf_z,
+      i = ~v1-1, j = ~v2-1, k = ~v3-1,
+      flatshading = TRUE, showlegend = TRUE,
+      facecolor = ~region_facecolor, hovertext = ~region
+    ) |>
+    add_trace(
+      name = "MRI Scar", type = "scatter3d", mode = "markers",
+      data = data_1 |> filter(group == "mri_scar", pacing_dir == .GlobalEnv$pacing_dir),
+      x = ~x, y = ~y, z = ~z
+    ) |>
+    add_trace(
+      name = "Averaged CV", type = "mesh3d", data = tri_cv,
+      x = remesh_vertices_roi$surf_x, y = remesh_vertices_roi$surf_y, z = remesh_vertices_roi$surf_z,
+      i = ~v1-1, j = ~v2-1, k = ~v3-1,
+      flatshading = TRUE, showlegend = TRUE,
+      facecolor = ~cv_facecolor, hovertext = ~hover_cv
+    ) |>
+    add_trace(
+      name = "RBF CV", type = "scatter3d", mode = "markers",
+      data = remesh_vertices_roi,
+      x = ~surf_x, y = ~surf_y, z = ~surf_z,
+      showlegend = TRUE,
+      marker = list(
+        color = ~cv_plot,         # capped CV for plotting
+        colorscale = "YlOrRd",
+        cmin = cv_lower_limit,    # lower limit from argument
+        cmax = 0.4,
+        colorbar = list(
+          x = +0.5,
+          y = -0.05,
+          title = "CV (m/s)",
+          orientation = "h"
+        )
+      ),
+      hovertext = ~hover_cv
+    ) |>
+    add_trace(
+      name = "LAT to CV Distance", type = "mesh3d", data = tri_cv,
+      x = remesh_vertices_roi$surf_x, y = remesh_vertices_roi$surf_y, z = remesh_vertices_roi$surf_z,
+      i = ~v1-1, j = ~v2-1, k = ~v3-1,
+      flatshading = TRUE, showlegend = TRUE,
+facecolor = colour_ramp(
+  brewer_pal(type = "div", palette = "Spectral", direction = -1)(11)
+)(
+  rescale(
+    pmin(tri_cv$tri_lat_dist, lat_dist_threshold)  # cap values at threshold
+  )
+), 
+      hovertext = ~hover_lat_dist
+    )
+  
+  # Scar distance (if present)
+#  if ("scar_dist" %in% names(remesh_vertices_roi)) {
+#    p <- p |>
+#      add_trace(
+#        name = "Scar-Surface Distance", type = "scatter3d", mode = "markers",
+#        data = remesh_vertices_roi |> filter(!is.na(scar_dist)),
+#        x = ~surf_x, y = ~surf_y, z = ~surf_z,
+#        showlegend = TRUE,
+#        marker = list(
+#          color = ~colour_ramp(
+#            brewer_pal(palette = "Spectral", direction = -1)(11)
+#          )(rescale(scar_dist)),
+#          showscale = FALSE
+#        ),
+#        hovertext = ~hover_scar_dist
+#      )
+#  }
+  
+  # Measured LATs
+  p <- p |>
+    add_trace(
+      name = "Measured LATs", type = "scatter3d", mode = "markers",
+      data = data_lat_measured,
+      x = ~x, y = ~y, z = ~z,
+      showlegend = TRUE,
+      marker = list(
+        color = ~lat,
+        size = 10,
+        cmax = plot_max, cmin = plot_min,
+        reversescale = TRUE,
+        colorscale = "Jet",
+        colorbar = list(x = -0.25, title = "Measured LAT (ms)", orientation = "V")
+      ),
+      hovertext = ~hover_lat
+    ) |>
+    add_trace(
+      name = "RBF LATs", type = "scatter3d", mode = "markers",
+      data = remesh_vertices_roi,
+      x = ~surf_x, y = ~surf_y, z = ~surf_z,
+      showlegend = TRUE,
+      marker = list(
+        color = ~lat,
+        cmax = plot_max, cmin = plot_min,
+        reversescale = TRUE,
+        colorscale = "Jet",
+        colorbar = list(x = -0.1, title = "Interpolated LAT (ms)", orientation = "V")
+      ),
+      hovertext = ~hover_lat
+    )
+  
+  # Final layout
+  p |>
+  layout(
+    showlegend = TRUE,
+    scene = list(camera = list(
+      eye = list(x = -1.5, y = 0.2, z = 1.5),
+      # orbital angle
+      up  = list(x = 0, y = 1, z = 0)      # which direction is "up"
+    )),
+annotations = list(
+  x = 1, y = -0.2,
+  text = paste0(
+    "Scar fit with neighbors radius = ", .GlobalEnv$neighbors_radius,
+    " mm and N neighbors = ", .GlobalEnv$n_neighbors,
+    "<br>LAT distance threshold = ", lat_dist_threshold, " mm",
+    "<br>CV lower limit = ", cv_lower_limit, " m/s ;",
+    " CV upper limit = ", cv_upper_limit, " m/s"
+  ), 
+  showarrow = FALSE, xref = "paper", yref = "paper",
+  xanchor = "right", font = list(size = 15)
+), 
+      title = list(
+        y = 0.95,
+        text = paste0(
+          "ID:", id, "<br>",
+          "Wavefront: ", pacing_dir, "<br>",
+          "Timepoint: ", timepoint, "<br>",
+          "Intervention: ", unique(data_1$intervention)
+        )
+      )
+    )
+}
+```
+
+```{r}
+plot_remesh_visualization(
+  carto_mesh,
+  remesh_vertices_roi,
+  tri_cv,
+  data_1,
+  id,
+  pacing_dir,
+  timepoint,
+  cv_lower_limit = .1,
+  cv_upper_limit = 2,
+  lat_dist_threshold = 7
+)
+```
+
+
+```{r echo=F}
+create_tri_cv_summary <- function(tri_cv,
+                                  cv_lower_limit_value = 0.1,
+                                  lat_dist_threshold = 5,
+                                  cv_upper_limit_value = 2,
+                                  cv_upper_limit_quantile = NULL) {
+  # Error check
+  if (!is.null(cv_upper_limit_value) && !is.null(cv_upper_limit_quantile)) {
+    stop("You can only provide one upper limit: either cv_upper_limit_value OR cv_upper_limit_quantile, not both.")
+  }
+  
+  # Determine upper limit
+  cv_upper_value <- NULL
+  if (!is.null(cv_upper_limit_value)) {
+    cv_upper_value <- cv_upper_limit_value
+  } else if (!is.null(cv_upper_limit_quantile)) {
+    cv_upper_value <- quantile(tri_cv$tri_cv, cv_upper_limit_quantile, na.rm = TRUE)
+  }
+  
+  # Build condition
+  meets_condition <- rep(TRUE, nrow(tri_cv))
+  if (!is.null(cv_lower_limit_value)) {
+    meets_condition <- meets_condition & tri_cv$tri_cv >= cv_lower_limit_value
+  }
+  if (!is.null(cv_upper_value)) {
+    meets_condition <- meets_condition & tri_cv$tri_cv <= cv_upper_value
+  }
+  if (!is.null(lat_dist_threshold)) {
+    meets_condition <- meets_condition & tri_cv$tri_lat_dist <= lat_dist_threshold
+  }
+  
+  # Build label
+  label_parts <- c()
+  if (!is.null(cv_lower_limit_value)) {
+    label_parts <- c(label_parts, paste0("CV ≥ ", cv_lower_limit_value))
+  }
+  if (!is.null(cv_upper_value)) {
+    label_parts <- c(label_parts, paste0("CV ≤ ", round(cv_upper_value, 3), " m/s"))
+  }
+  if (!is.null(lat_dist_threshold)) {
+    label_parts <- c(label_parts, paste0("LAT ≤ ", lat_dist_threshold, " mm"))
+  }
+  
+  filter_label <- if (length(label_parts) > 0) {
+    paste("Filtered:", paste(label_parts, collapse = " & "))
+  } else {
+    "Filtered (no limits)"
+  }
+  
+  # Expand dataset with two groups
+  tri_cv_expanded <-
+    dplyr::bind_rows(
+      tri_cv |> dplyr::mutate(filter_group = "All values"),
+      tri_cv |> dplyr::filter(meets_condition) |> dplyr::mutate(filter_group = filter_label)
+    )
+  
+  tri_cv_expanded |>
+    dplyr::select(tri_cv, tri_lat_dist, region, filter_group) |>
+    gtsummary::tbl_strata(
+      strata = filter_group,
+      .tbl_fun = \(x) {
+        gtsummary::tbl_summary(
+          x,
+          by = region,
+          type = where(is.numeric) ~ "continuous2",
+          statistic = gtsummary::all_continuous2() ~
+            c("{mean}±{sd}", "{median} [{p25}-{p75}]", "{min}, {max}"),
+          digits = gtsummary::all_continuous2() ~ 3
+        )
+      }
+    ) |>
+    gtsummary::as_gt()
+}
+```
+
+```{r}
+create_tri_cv_summary(
+  tri_cv,
+  cv_lower_limit_value = NULL,
+  cv_upper_limit_value = 2,
+  lat_dist_threshold = 7
+  #cv_upper_limit_quantile = 0.99
+)
+```
+
+# Regression Estimates for Average CV
+
+- We know that CV is dependent on distance between measured LAT and interpolated LATs. When distance between measured and interpolated is low, error is low, when distance is high, both CV and error increase. 
+- We know that conduction velocity follows a log-normal distribution
+--> To most accurately estimate average CVs, we use linear regression to estimate average conduction velocity across regions, controlling for  distance between measured and interpolated LATs. We generate estimates centered at the average measured->interpolated LAT distance after filtering.
+
+```{r echo = F}
+get_emm_table <- function(data,
+                          lat_max = 7,
+                          cv_min = NULL,
+                          cv_max = 2) {
+  
+  # Start with the input data
+  data_filtered <- data
+  
+  # Apply filters only if arguments are not NULL
+  if (!is.null(lat_max)) {
+    data_filtered <- data_filtered %>%
+      filter(tri_lat_dist <= lat_max)
+  }
+  
+  if (!is.null(cv_min)) {
+    data_filtered <- data_filtered %>%
+      filter(tri_cv >= cv_min)
+  }
+  
+  if (!is.null(cv_max)) {
+    data_filtered <- data_filtered %>%
+      filter(tri_cv <= cv_max)
+  }
+  
+  # Decide predictors dynamically
+  predictors <- "tri_lat_dist"
+  if (length(unique(data_filtered$region)) > 1) {
+    predictors <- c("region", predictors)
+  }
+  
+  # Fit model
+  mod <- lm(reformulate(predictors, response = "log(tri_cv)"), 
+            data = data_filtered)
+  
+  # Compute emmeans
+  has_region <- length(unique(data_filtered$region)) > 1
+  
+  emm <- if (has_region) {
+    emmeans(mod, ~ tri_lat_dist, by = "region", 
+            type = "response", bias.adjust = TRUE)
+  } else {
+    emmeans(mod, ~ tri_lat_dist, 
+            type = "response", bias.adjust = TRUE) |>
+      as.data.frame() |>
+      mutate(region = unique(data_filtered$region)) |>
+      select(region, everything())
+  }
+  
+  # Round numeric columns
+  emm_df <- as.data.frame(emm) %>%
+    mutate(across(where(is.numeric), ~ round(.x, 3)))
+  
+  return(emm_df)
+}
+```
+
+
+## Uniltered Linear Regression Estimates: log(CV) ~ Region + LAT Distance
+
+```{r}
+get_emm_table(tri_cv, lat_max = NULL, cv_min = NULL, cv_max = NULL)
+```
+
+## Filtered Linear Regression Estimates: log(CV) ~ Region + LAT Distance
+
+```{r}
+get_emm_table(tri_cv, lat_max = 7, cv_min = NULL, cv_max = 2)
+```
+
+
+# Save Across Pacing Wavefronts
+
+# Save Data
+
+```{r echo=F}
+combine_rds_pacing_dir_v2(id = .GlobalEnv$id,
+                       tri_cv,
+                       grouping = "remesh_tri_cv",
+                       base_dir = paste0("data/ready_to_analyze/", .GlobalEnv$id,"/"),
+                       suffix = "",
+                       step = "tri_cv_step_4",
+                       timepoint = .GlobalEnv$timepoint,
+                       wavefront = .GlobalEnv$pacing_dir)
+```
+
+```{r echo=F}
+combine_rds_pacing_dir_v2(id = .GlobalEnv$id,
+                       remesh_vertices_roi,
+                       grouping = "carto_remesh",
+                       base_dir = paste0("data/ready_to_analyze/", .GlobalEnv$id,"/"),
+                       suffix = "",
+                       step = paste0("remeshed_cv_step_4"),
+                       timepoint = .GlobalEnv$timepoint,
+                       wavefront = .GlobalEnv$pacing_dir)
+```
+
+# Version and Package Details
+
+```{r echo=F}
+paste(version$version.string, version$nickname) 
+paste0("RStudio Version ",rstudioapi::versionInfo()$version, " ", rstudioapi::versionInfo()$release_name) # RStudio Version
+subset(data.frame(sessioninfo::package_info()), attached==TRUE, c(package, loadedversion)) # Loaded Packages
+```
+
+# When was this file last run to completion?
+
+```{r}
+date()
+```
