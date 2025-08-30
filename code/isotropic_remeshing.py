@@ -45,7 +45,7 @@ from pymeshlab import PureValue  # absolute quantities in 2025+ API
 # ----------- Defaults you can tune -----------
 # Target remeshing parameters (surface-distance check disabled by default for speed)
 TARGET_EDGE_LENGTH = 3.0
-TARGET_AREA = 3.0  # Default target area for equilateral triangle
+TARGET_AREA = 4.0  # Default target area for equilateral triangle
 ITERATIONS = 5
 FEATURE_ANGLE_DEG = 90.0
 MAX_SURF_DIST = 2.0
@@ -450,17 +450,17 @@ if __name__ == "__main__":
     # Create results directory and generate output filenames
     results_dir = ensure_results_directory()
     prefix = args.output_prefix
-    original_ply = results_dir / f"{prefix}_original.ply"
-    original_npz = results_dir / f"{prefix}_original.npz"
-    remeshed_points_csv = results_dir / f"{prefix}_remeshed_points.csv"
-    remeshed_faces_csv = results_dir / f"{prefix}_remeshed_faces.csv"
+#    original_ply = results_dir / f"{prefix}_original.ply"
+#    original_npz = results_dir / f"{prefix}_original.npz"
+#    remeshed_points_csv = results_dir / f"{prefix}_remeshed_points.csv"
+#    remeshed_faces_csv = results_dir / f"{prefix}_remeshed_faces.csv"
     remeshed_ply = results_dir / f"{prefix}_remeshed.ply"
     remeshed_npz = results_dir / f"{prefix}_remeshed.npz"
 
     # --- Save ORIGINAL as PLY + NPZ ---
-    print("Saving ORIGINAL mesh (PLY + NPZ)...")
-    save_mesh_ply(V, F, original_ply)
-    save_mesh_npz(V, F, original_npz)
+#    print("Saving ORIGINAL mesh (PLY + NPZ)...")
+#    save_mesh_ply(V, F, original_ply)
+#    save_mesh_npz(V, F, original_npz)
 
     if not args.no_viz:
         print("Visualizing original mesh...")
@@ -482,14 +482,14 @@ if __name__ == "__main__":
         visualize_mesh(V2, F2, title='Remeshed Mesh')
 
     # --- Save REMESHED as CSV, PLY, NPZ ---
-    print("Saving REMESHED mesh (CSV + PLY + NPZ)...")
-    save_mesh_csv(V2, F2, points_file=remeshed_points_csv, faces_file=remeshed_faces_csv)
+    print("Saving REMESHED mesh (PLY + NPZ)...")
+#    save_mesh_csv(V2, F2, points_file=remeshed_points_csv, faces_file=remeshed_faces_csv)
     save_mesh_ply(V2, F2, remeshed_ply)
     save_mesh_npz(V2, F2, remeshed_npz)
 
     print("Done. Outputs in 'results' folder:")
-    print(f"  ORIGINAL:  {original_ply.name}, {original_npz.name}")
-    print(f"  REMESHED:  {remeshed_points_csv.name}, {remeshed_faces_csv.name}, {remeshed_ply.name}, {remeshed_npz.name}")
+#    print(f"  ORIGINAL:  {original_ply.name}, {original_npz.name}")
+#    print(f"  REMITTED:  {remeshed_points_csv.name}, {remeshed_faces_csv.name}, {remeshed_ply.name}, {remeshed_npz.name}")
     
     # Print mesh statistics
     print(f"\nMesh Statistics:")
